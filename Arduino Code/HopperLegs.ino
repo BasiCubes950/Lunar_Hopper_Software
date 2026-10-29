@@ -1,14 +1,3 @@
-/*
- * Lunar Hopper - legs main sketch (bench-test version)
- * Tabs: leg_control_d1 (leg actuators), self_right_d2 (self-righting)
- *
- * Self-righting starts by itself when the hopper is still and tilted.
- *
- * Serial monitor at 115200:
- *   r = start self-righting by hand      f = fold legs test (40 mm lowered)
- *   h = legs to launch pose      0 = legs home
- */
-
 uint8_t lastState = 255;
 
 void setup() {
