@@ -1,20 +1,3 @@
-/*
- * Lunar Hopper - D2: Self-righting decision code
- *
- * Flow:  landed -> wait until still -> read IMU orientation -> decide leg lengths
- *        -> move legs (D1) -> wait until still -> re-check -> repeat until upright.
- *
- * Because the IMU has error and the hopper geometry is still unknown, this works as a
- * CLOSED LOOP: small corrective pushes, re-measured after every move, instead of one
- * big calculated move.
- *
- * Uses D1 only through its public functions (moveLegTo, allLegsDone, ...), so it does
- * not care how the legs are actually driven.
- *
- * It starts by itself: call checkAutoSelfRighting() every loop and it begins whenever the
- * hopper has been still while tilted. You can also start it by hand with startSelfRighting().
- */
-
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
