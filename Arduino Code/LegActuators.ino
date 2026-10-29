@@ -1,26 +1,3 @@
-/*
- * Lunar Hopper - D1: Leg actuator control
- * Actuonix L16 x3, Arduino Servo.h interface.
- *
- * What D1 does
- *   1. Moves each leg to a commanded length (0-100 mm), non-blocking.
- *   2. Ground detection: if a leg stalls short of its target, it is touching the ground.
- *   3. Leg folding as the hopper lowers to jump.
- *
- * How D2 (self-righting decision code) should use this
- *   - moveLegTo(i, mm) / moveLegBy(i, mm)   command a leg
- *   - getLegPosition(i)                     where the leg actually is (mm)
- *   - legIsDone(i) / allLegsDone()          move finished (reached OR blocked)
- *   - legIsTouchingGround(i)                true if the leg stalled short of target
- *   - updateLegs()                          call EVERY loop; never use long delay()
- *
- * IMPORTANT - ground detection needs REAL position feedback from the actuator.
- *   With feedback (FEEDBACK_PINS >= 0): position is measured, stalls are detected.
- *   Without feedback (-1): position is only an ESTIMATE from MAX_SPEED_MM_S, and
- *   ground detection CANNOT work (legHasFeedback(i) returns false).
- *   Confirm the -R vs -P actuator version before relying on this.
- */
-
 #include <Servo.h>
 
 // ===================== CONFIGURATION =====================
