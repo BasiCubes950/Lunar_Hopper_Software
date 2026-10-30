@@ -1,3 +1,7 @@
+// Standalone IMU sensor test: open it on its own to use it. When compiled together with the
+// main program (HopperLegs.ino defines HOPPER_MAIN_SKETCH) this whole file is skipped.
+#ifndef HOPPER_MAIN_SKETCH
+
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
@@ -40,3 +44,5 @@ void loop(void)
   
   delay(100);
 }
+
+#endif  // HOPPER_MAIN_SKETCH

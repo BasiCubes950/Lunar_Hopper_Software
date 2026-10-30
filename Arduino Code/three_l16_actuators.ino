@@ -1,3 +1,7 @@
+// Standalone three-actuator test: open it on its own to use it. When compiled together with the
+// main program (HopperLegs.ino defines HOPPER_MAIN_SKETCH) this whole file is skipped.
+#ifndef HOPPER_MAIN_SKETCH
+
 #include <Servo.h>
 
 // ---------- Configuration ----------
@@ -117,3 +121,5 @@ void loop() {
     }
   }
 }
+
+#endif  // HOPPER_MAIN_SKETCH
