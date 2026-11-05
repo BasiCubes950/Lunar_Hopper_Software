@@ -1,19 +1,5 @@
-// D1: STAC lunar hopper leg control (SKETCH, not yet compiled or tested on hardware)
-//
-// Hardware: Arduino Nano, Adafruit BNO055 (I2C: A4 = SDA, A5 = SCL), 3x Actuonix L16-R.
-// The L16-R takes an RC-servo signal (1000-2000 us) and has NO position feedback, so leg
-// position is an open-loop estimate. That is why ground contact is detected from the IMU.
-//
-// Power the actuators from a regulated supply (buck converter), not the Nano's 5V pin,
-// and share a common ground with the Nano.
-//
-// Contact detection, per leg (one leg at a time):
-//   1. Wait until the hopper is still (gravity vector steady and gyro near zero).
-//   2. Capture the baseline gravity vector.
-//   3. Extend that leg in small steps, re-reading the IMU after each step.
-//   4. When the gravity vector has rotated past CONTACT_TILT_DEG from the baseline,
-//      the leg is bearing weight: stop and record its position.
-// Tilt is measured relative to the baseline, so the BNO055 mounting axes don't matter.
+// STAC Lunar Hopper - Leg Contact Sensing & Calibration
+// Hardware: Arduino Nano, BNO055 IMU (I2C 0x28), 3x Actuonix L16-R Actuators
 
 #include <Wire.h>
 #include <Servo.h>
@@ -21,148 +7,115 @@
 #include <Adafruit_BNO055.h>
 #include <math.h>
 
-// ---------- Config (TODO: confirm/measure) ----------
-const uint8_t LEG_PINS[3]  = {9, 10, 11};
-const float STROKE_MM      = 100.0;  // TODO: confirm stroke of the ordered L16-R
-const float SPEED_MM_S     = 13.0;   // ESTIMATE: measure in person
-const int   US_RETRACTED   = 1000;   // L16-R: ~1000 us = retracted, ~2000 us = extended
-const int   US_EXTENDED    = 2000;   // TODO: confirm against datasheet / calibrate
+// Pins & Actuator Calibration
+const uint8_t LEG_PINS[3] = {9, 10, 11};
+const float STROKE_MM     = 100.0;
+const float SPEED_MM_S    = 13.0;   // Measured extension speed (mm/s)
+const int US_RETRACTED    = 1000;   // 0 mm extension
+const int US_EXTENDED     = 2000;   // 100 mm extension
 
-const float SETTLE_TILT_DEG  = 1.0;    // max gravity-vector drift while "still"
-const float SETTLE_RATE_RADS = 0.05;   // max gyro magnitude while "still" (rad/s)
-const unsigned long SETTLE_MS = 500;   // how long it must stay still
-const float CONTACT_TILT_DEG = 2.0;    // tilt from baseline that means "touching ground"
-const float STEP_MM          = 1.0;    // extension per probe step
-const float FOLD_RANGE_MM    = 20.0;   // TODO: how far legs fold at full compression
+// Motion Thresholds
+const float SETTLE_TILT_DEG  = 1.0;
+const float SETTLE_RATE_RADS = 0.05;
+const unsigned long SETTLE_MS = 500;
+const float CONTACT_TILT_DEG = 2.0;
+const float STEP_MM          = 1.0;
+const float FOLD_RANGE_MM    = 20.0;
 
-// Wait for the leg to physically move one step before reading the IMU
 const unsigned long STEP_DELAY_MS = (unsigned long)(1000.0 * STEP_MM / SPEED_MM_S);
 
-// ---------- State ----------
-struct Leg {
-  Servo servo;
-  float posMm = 0;  // commanded position; the real leg lags behind this
-
-  void attach(uint8_t pin) {
-    servo.attach(pin);
-    write(0);
-  }
-
-  void write(float mm) {
-    mm = constrain(mm, 0.0, STROKE_MM);
-    posMm = mm;
-    servo.writeMicroseconds((int)(US_RETRACTED + (mm / STROKE_MM) * (US_EXTENDED - US_RETRACTED)));
-  }
-};
-
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
-Leg legs[3];
-float contactMm[3] = {0, 0, 0};   // extension at which each leg touched ground
+Servo legServos[3];
+float currentMm[3] = {0, 0, 0};
+float contactMm[3] = {0, 0, 0};
 
-// ---------- IMU helpers ----------
-imu::Vector<3> readGravity() {
-  return bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
+void setLeg(uint8_t leg, float mm) {
+  mm = constrain(mm, 0.0, STROKE_MM);
+  currentMm[leg] = mm;
+  int pulseWidth = US_RETRACTED + (int)((mm / STROKE_MM) * (US_EXTENDED - US_RETRACTED));
+  legServos[leg].writeMicroseconds(pulseWidth);
 }
 
-float gyroMagnitude() {
-  // VECTOR_GYROSCOPE is rad/s in recent Adafruit_BNO055 versions; check your version
-  return bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE).magnitude();
+float getTiltAngle(const imu::Vector<3>& v1, const imu::Vector<3>& v2) {
+  float dot = v1.dot(v2) / (v1.magnitude() * v2.magnitude());
+  return acos(constrain(dot, -1.0, 1.0)) * 180.0 / PI;
 }
 
-float angleBetweenDeg(const imu::Vector<3>& a, const imu::Vector<3>& b) {
-  float c = a.dot(b) / (a.magnitude() * b.magnitude());
-  c = constrain(c, -1.0, 1.0);
-  return acos(c) * 180.0 / PI;
-}
+bool waitForStillness(unsigned long timeoutMs) {
+  unsigned long tStart = millis();
+  unsigned long tStableStart = 0;
+  imu::Vector<3> refGravity = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
 
-// ---------- D1 behaviors ----------
+  while (millis() - tStart < timeoutMs) {
+    imu::Vector<3> g = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
+    float gyroMag = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE).magnitude();
 
-// Block until the hopper has been still for SETTLE_MS, or give up after timeoutMs.
-bool waitUntilSettled(unsigned long timeoutMs) {
-  unsigned long start = millis();
-  unsigned long stableSince = 0;
-  imu::Vector<3> ref = readGravity();
+    bool isStill = (getTiltAngle(g, refGravity) < SETTLE_TILT_DEG) && (gyroMag < SETTLE_RATE_RADS);
 
-  while (millis() - start < timeoutMs) {
-    imu::Vector<3> g = readGravity();
-    bool still = angleBetweenDeg(g, ref) < SETTLE_TILT_DEG && gyroMagnitude() < SETTLE_RATE_RADS;
-
-    if (!still) {
-      ref = g;
-      stableSince = 0;
+    if (!isStill) {
+      refGravity = g;
+      tStableStart = 0;
     } else {
-      if (stableSince == 0) stableSince = millis();
-      if (millis() - stableSince >= SETTLE_MS) return true;
+      if (tStableStart == 0) tStableStart = millis();
+      if (millis() - tStableStart >= SETTLE_MS) return true;
     }
     delay(20);
   }
   return false;
 }
 
-// Extend one leg until the IMU shows it is bearing weight.
-// Returns true and sets contactMm[i] on contact; false if never settled or never touched.
-bool probeLeg(uint8_t i) {
-  if (!waitUntilSettled(3000)) return false;
+bool probeLeg(uint8_t legIndex) {
+  if (!waitForStillness(3000)) return false;
 
-  imu::Vector<3> baseline = readGravity();
+  imu::Vector<3> baselineGravity = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
 
-  for (float mm = legs[i].posMm; mm <= STROKE_MM; mm += STEP_MM) {
-    legs[i].write(mm);
+  for (float mm = currentMm[legIndex]; mm <= STROKE_MM; mm += STEP_MM) {
+    setLeg(legIndex, mm);
     delay(STEP_DELAY_MS);
 
-    if (angleBetweenDeg(readGravity(), baseline) > CONTACT_TILT_DEG) {
-      contactMm[i] = mm;   // leg is on the ground; it stays here
+    imu::Vector<3> currentGravity = bno.getVector(Adafruit_BNO055::VECTOR_GRAVITY);
+    if (getTiltAngle(currentGravity, baselineGravity) > CONTACT_TILT_DEG) {
+      contactMm[legIndex] = mm;
       return true;
     }
   }
-  return false;  // fully extended without touching anything
+  return false;
 }
 
-// Hold every leg at its ground-contact length (straight legs for the jump).
-void holdStraight() {
-  for (uint8_t i = 0; i < 3; i++) legs[i].write(contactMm[i]);
-}
-
-// Fold legs slightly as the hopper lowers so they stay on the ground
-// without blocking the carbon fibers.
-// compression: 0 = not lowered, 1 = fully lowered.
-// TODO: nothing supplies this value yet.
-void foldLegs(float compression) {
-  compression = constrain(compression, 0.0, 1.0);
-  for (uint8_t i = 0; i < 3; i++) legs[i].write(contactMm[i] - compression * FOLD_RANGE_MM);
-}
-
-// ---------- Arduino entry points ----------
 void setup() {
   Serial.begin(115200);
 
   if (!bno.begin()) {
-    Serial.println(F("BNO055 not found, check wiring"));
-    while (1) {}
+    Serial.println(F("ERROR: BNO055 initialization failed. Check I2C lines."));
+    while (1);
   }
   bno.setExtCrystalUse(true);
 
-  for (uint8_t i = 0; i < 3; i++) legs[i].attach(LEG_PINS[i]);
+  for (uint8_t i = 0; i < 3; i++) {
+    legServos[i].attach(LEG_PINS[i]);
+    setLeg(i, 0);
+  }
 
-  // Give the legs time to reach full retraction before doing anything
+  // Allow physical retraction before calibration
   delay((unsigned long)(1000.0 * STROKE_MM / SPEED_MM_S) + 500);
 }
 
 void loop() {
-  // Demo: probe each leg in turn, one at a time, and report the results.
   for (uint8_t i = 0; i < 3; i++) {
-    bool found = probeLeg(i);
-    Serial.print(F("Leg "));
-    Serial.print(i);
-    if (found) {
-      Serial.print(F(" contact at "));
+    if (probeLeg(i)) {
+      Serial.print(F("Leg "));
+      Serial.print(i);
+      Serial.print(F(" ground contact detected at: "));
       Serial.print(contactMm[i]);
       Serial.println(F(" mm"));
     } else {
-      Serial.println(F(" no contact (not settled, or fully extended)"));
+      Serial.print(F("Leg "));
+      Serial.print(i);
+      Serial.println(F(" probe failed / reached full extension."));
     }
   }
 
-  holdStraight();
-  while (1) {}
+  // Hold contact positions indefinitely
+  for (uint8_t i = 0; i < 3; i++) setLeg(i, contactMm[i]);
+  while (1);
 }
